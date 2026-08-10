@@ -210,7 +210,9 @@
             <video id="remote-video" autoplay playsinline muted class="hidden"></video>
             <button id="unmute-btn" class="btn-amber hidden" style="position:absolute; bottom:10px; right:10px;" onclick="unmuteScreen()">🔊 Turn on sound</button>
           </div>
-          <div class="row-gap" id="teacher-share-controls" style="margin-top:10px;"></div>
+          <div class="row-gap" id="teacher-share-controls" style="margin-top:10px; align-items:center;"></div>
+          <div id="share-status" class="muted hidden" style="margin-top:6px;"></div>
+          <video id="local-preview" muted autoplay playsinline class="hidden" style="width:160px; border-radius:8px; margin-top:8px; border:1px solid var(--line);"></video>
 
           <div class="side-card" style="margin-top:16px;">
             <h3>Watch together</h3>
@@ -269,24 +271,27 @@ let state = {
   attendanceRowId: null,
   isSharing: false,
   localStream: null,
-  peerConnections: new Map(), // studentId -> RTCPeerConnection (teacher side)
+  peerConnections: new Map(),  // studentId -> RTCPeerConnection (teacher side)
+  pendingCandidates: new Map(), // teacher: studentId -> ICE candidates queued before remote desc set
+                                 // student: single array under key '__student'
   peerConnection: null,        // student side
+  watchdogTimer: null,         // periodically retries any missing/broken peer connections
 };
 
+// STUN-only will work when teacher & student happen to be on the same
+// network or have permissive NATs. It will NOT work in most real-world
+// cases (school wifi + home wifi + mobile data, corporate firewalls) —
+// that requires a TURN relay. The free openrelay.metered.ca credentials
+// below are known to be unreliable/rate-limited as of 2026 (see console
+// warning below and the write-up in chat). For production use, replace
+// this with your own TURN credentials (e.g. Twilio NTS, Cloudflare Calls,
+// Metered.ca with an API key, or a self-hosted coturn box).
 const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
-    // Free public TURN relay — helps connections succeed across different
-    // networks/routers (school wifi, home wifi, mobile data, etc.) where
-    // STUN alone often fails. Fine to start with; swap for your own TURN
-    // server later if you outgrow the free tier.
+    { urls: "stun:stun.cloudflare.com:3478" },
     {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject"
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
+      urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443", "turn:openrelay.metered.ca:443?transport=tcp"],
       username: "openrelayproject",
       credential: "openrelayproject"
     }
@@ -469,6 +474,8 @@ async function enterClassroom(c) {
   resetScreenPanel();
   document.getElementById("yt-frame").classList.add("hidden");
   document.getElementById("yt-empty").classList.remove("hidden");
+  document.getElementById("share-status").classList.add("hidden");
+  document.getElementById("local-preview").classList.add("hidden");
 
   const isAdmin = state.profile.role === "admin";
   document.getElementById("admin-controls").innerHTML = isAdmin ? `
@@ -571,11 +578,22 @@ async function joinRealtimeChannel(classId) {
 
   ch.on("broadcast", { event: "youtube-set" }, ({ payload }) => applyYoutube(payload.id));
 
-  ch.on("broadcast", { event: "webrtc-signal" }, ({ payload }) => handleSignal(ch, payload));
+  ch.on("broadcast", { event: "webrtc-signal" }, ({ payload }) => handleSignal(ch, payload).catch(err => console.error("[webrtc] signal handler error:", err)));
 
-  ch.subscribe(async (status) => {
+  ch.on("broadcast", { event: "screen-share-stopped" }, () => {
+    if (state.peerConnection) { state.peerConnection.close(); state.peerConnection = null; }
+    resetScreenPanel();
+  });
+
+  ch.subscribe(async (status, err) => {
+    console.log("[realtime] channel status:", status, err || "");
     if (status === "SUBSCRIBED") {
       await ch.track({ user_id: state.user.id, full_name: state.profile.full_name, role: state.profile.role });
+    } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+      // Very common cause: this channel is `private: true` but there are no
+      // RLS policies on realtime.messages granting select/insert for
+      // broadcast+presence — see the setup note in schema.sql / chat.
+      console.error("[realtime] failed to join channel — check Realtime RLS policies on realtime.messages for this project.");
     }
   });
 
@@ -584,8 +602,11 @@ async function joinRealtimeChannel(classId) {
 
 async function teardownChannel() {
   if (state.isSharing) stopScreenShare();
+  if (state.watchdogTimer) { clearInterval(state.watchdogTimer); state.watchdogTimer = null; }
+  if (state.audioCtx) { state.audioCtx.close().catch(() => {}); state.audioCtx = null; }
   state.peerConnections.forEach(pc => pc.close());
   state.peerConnections.clear();
+  state.pendingCandidates.clear();
   if (state.peerConnection) { state.peerConnection.close(); state.peerConnection = null; }
   if (state.channel) { await state.channel.untrack(); await supabase.removeChannel(state.channel); state.channel = null; }
   state.roster.clear();
@@ -636,15 +657,62 @@ async function downloadAttendanceCsv(classId, title) {
 
 /* ---------------- SCREEN SHARE (WebRTC mesh, teacher -> each student) ---------------- */
 
-window.toggleScreenShare = () => state.isSharing ? stopScreenShare() : startScreenShare();
+window.toggleScreenShare = () => {
+  if (state.isSharing) { stopScreenShare(); return; }
+  // Create/unlock the shared AudioContext synchronously, inside this real
+  // click handler. If we wait and create it later (after the
+  // getDisplayMedia/getUserMedia awaits below), Safari treats it as no
+  // longer tied to a user gesture and leaves it permanently "suspended" —
+  // everything looks connected but no sound ever plays. Doing it here,
+  // and reusing the same context for the whole session, avoids that.
+  if (!state.audioCtx) {
+    try {
+      state.audioCtx = new AudioContext();
+    } catch (e) {
+      console.error("[audio] failed to create AudioContext:", e);
+    }
+  }
+  state.audioCtx?.resume().catch(e => console.warn("[audio] resume() failed:", e));
+  startScreenShare();
+};
+
+function setShareStatus(text, isError) {
+  const el = document.getElementById("share-status");
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isError ? "var(--danger)" : "var(--ink-soft)";
+  el.classList.toggle("hidden", !text);
+}
 
 async function startScreenShare() {
+  // 1) Fail loudly (not silently) if the browser/context can't do this at all.
+  //    Most common real-world cause of "screen share does nothing": iOS
+  //    Safari has no getDisplayMedia, or the page isn't served over HTTPS
+  //    (getDisplayMedia requires a secure context).
+  if (!window.isSecureContext) {
+    setShareStatus("Screen share needs HTTPS. This page isn't loaded over a secure connection.", true);
+    return;
+  }
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    setShareStatus("This browser/device doesn't support screen sharing (e.g. iOS Safari has no support). Try Chrome/Edge on desktop, or Safari on macOS.", true);
+    return;
+  }
+
   try {
     state.localStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
       audio: true // system/tab audio, if the presenter ticks "share audio" — not the mic
     });
-  } catch (e) { return; }
+  } catch (e) {
+    console.error("[screenshare] getDisplayMedia failed:", e);
+    setShareStatus(
+      e.name === "NotAllowedError"
+        ? "Screen share permission was denied or cancelled."
+        : `Couldn't start screen share (${e.name || e.message}).`,
+      true
+    );
+    return;
+  }
 
   // Screen capture does NOT include the microphone — grab it separately.
   // Timeout so a missed/ignored mic permission prompt can't block the
@@ -656,44 +724,81 @@ async function startScreenShare() {
       new Promise((_, reject) => setTimeout(() => reject(new Error("mic-timeout")), 8000))
     ]);
   } catch (e) {
-    // Mic permission denied, unavailable, or not answered in time.
+    console.warn("[screenshare] mic unavailable, continuing video-only audio-wise:", e.message || e);
   }
 
   const videoTrack = state.localStream.getVideoTracks()[0];
   const displayAudioTrack = state.localStream.getAudioTracks()[0]; // may not exist
+  if (!displayAudioTrack) {
+    console.warn("[screenshare] no system/tab audio track — browser likely ignored the audio:true option for this capture type (common when sharing a single app window instead of a whole screen/tab).");
+  }
 
   // Mix mic + any display audio into a single outbound audio track.
   let outboundAudioTrack = null;
   if (micStream || displayAudioTrack) {
-    const audioCtx = new AudioContext();
-    const dest = audioCtx.createMediaStreamDestination();
-    if (micStream) audioCtx.createMediaStreamSource(micStream).connect(dest);
-    if (displayAudioTrack) audioCtx.createMediaStreamSource(new MediaStream([displayAudioTrack])).connect(dest);
-    outboundAudioTrack = dest.stream.getAudioTracks()[0];
-    state.audioCtx = audioCtx;
+    try {
+      const audioCtx = state.audioCtx;
+      if (!audioCtx) throw new Error("no AudioContext available (unlock step failed)");
+      if (audioCtx.state === "suspended") await audioCtx.resume();
+      const dest = audioCtx.createMediaStreamDestination();
+      state.audioSourceNodes = [];
+      if (micStream) state.audioSourceNodes.push(audioCtx.createMediaStreamSource(micStream).connect(dest));
+      if (displayAudioTrack) state.audioSourceNodes.push(audioCtx.createMediaStreamSource(new MediaStream([displayAudioTrack])).connect(dest));
+      outboundAudioTrack = dest.stream.getAudioTracks()[0];
+      state.audioDest = dest;
+      console.log("[audio] mixed track ready, AudioContext state:", audioCtx.state);
+    } catch (e) {
+      console.error("[audio] audio mixing failed, sharing video-only:", e);
+    }
+  } else {
+    console.warn("[audio] no mic and no system audio — sharing video-only, students will hear nothing.");
   }
 
   state.micStream = micStream;
   state.outboundStream = new MediaStream(outboundAudioTrack ? [videoTrack, outboundAudioTrack] : [videoTrack]);
   state.isSharing = true;
-  document.getElementById("share-btn").textContent = "Stop screen share";
+
+  const btn = document.getElementById("share-btn");
+  if (btn) btn.textContent = "Stop screen share";
+  const micNote = micStream ? "mic on" : "mic off";
+  setShareStatus(outboundAudioTrack ? `Sharing screen + audio (${micNote})…` : `Sharing screen — no audio captured (${micNote}, no tab/system audio)`, !outboundAudioTrack);
+
+  const preview = document.getElementById("local-preview");
+  preview.srcObject = state.localStream;
+  preview.classList.remove("hidden");
+
   videoTrack.addEventListener("ended", stopScreenShare);
   maintainTeacherConnections(state.channel);
+
+  // Safety net: presence-sync doesn't always fire (e.g. a student's
+  // browser tab was backgrounded during join). Re-check periodically so a
+  // student who never got an offer eventually gets one.
+  state.watchdogTimer = setInterval(() => maintainTeacherConnections(state.channel), 5000);
 }
 
 function stopScreenShare() {
+  const wasSharing = state.isSharing;
   state.isSharing = false;
   const btn = document.getElementById("share-btn");
   if (btn) btn.textContent = "Start screen share";
+  setShareStatus("");
+  document.getElementById("local-preview")?.classList.add("hidden");
+  if (state.watchdogTimer) { clearInterval(state.watchdogTimer); state.watchdogTimer = null; }
   state.localStream?.getTracks().forEach(t => t.stop());
   state.micStream?.getTracks().forEach(t => t.stop());
-  state.audioCtx?.close();
+  state.audioSourceNodes?.forEach(n => { try { n.disconnect(); } catch (e) {} });
+  state.audioSourceNodes = null;
+  state.audioDest = null;
   state.localStream = null;
   state.micStream = null;
   state.outboundStream = null;
-  state.audioCtx = null;
   state.peerConnections.forEach(pc => pc.close());
   state.peerConnections.clear();
+  state.pendingCandidates.clear();
+  // Tell students to reset their view instead of leaving a frozen frame.
+  if (wasSharing && state.channel) {
+    state.channel.send({ type: "broadcast", event: "screen-share-stopped", payload: {} });
+  }
 }
 
 // Teacher: ensure a peer connection (with current stream) exists for every student in roster
@@ -701,16 +806,38 @@ function maintainTeacherConnections(ch) {
   if (!state.isSharing) return;
   state.roster.forEach((p, uid) => {
     if (uid === state.user.id) return;
-    if (!state.peerConnections.has(uid)) createTeacherConnection(ch, uid);
+    const existing = state.peerConnections.get(uid);
+    if (!existing || ["failed", "closed", "disconnected"].includes(existing.connectionState)) {
+      if (existing) { existing.close(); state.peerConnections.delete(uid); }
+      createTeacherConnection(ch, uid).catch(err => console.error("[webrtc] failed to create connection for", uid, err));
+    }
   });
+  updateShareStatus();
+}
+
+function updateShareStatus() {
+  if (!state.isSharing) return;
+  const total = [...state.roster.keys()].filter(uid => uid !== state.user.id).length;
+  const connected = [...state.peerConnections.values()].filter(pc => pc.connectionState === "connected").length;
+  setShareStatus(`Live to ${connected}/${total} student${total === 1 ? "" : "s"}`, connected < total && total > 0);
 }
 
 async function createTeacherConnection(ch, studentId) {
+  console.log("[webrtc] creating offer for", studentId);
   const pc = new RTCPeerConnection(ICE_SERVERS);
   state.peerConnections.set(studentId, pc);
+  state.pendingCandidates.set(studentId, []);
   state.outboundStream.getTracks().forEach(t => pc.addTrack(t, state.outboundStream));
   pc.onicecandidate = (e) => {
     if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "ice", data: e.candidate } });
+  };
+  pc.onconnectionstatechange = () => {
+    console.log("[webrtc] teacher->", studentId, "connection state:", pc.connectionState);
+    updateShareStatus();
+    if (pc.connectionState === "failed") {
+      // Try to recover the existing connection before tearing it down.
+      pc.restartIce?.();
+    }
   };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -724,25 +851,34 @@ async function handleSignal(ch, payload) {
 
   if (!isAdmin) {
     if (payload.kind === "offer") {
+      console.log("[webrtc] received offer from teacher");
       const pc = new RTCPeerConnection(ICE_SERVERS);
       state.peerConnection = pc;
+      state.pendingCandidates.set("__student", []);
       pc.ontrack = (e) => {
+        console.log("[webrtc] received remote track:", e.track.kind);
         const video = document.getElementById("remote-video");
         video.srcObject = e.streams[0];
         video.muted = true;
         video.classList.remove("hidden");
         document.getElementById("screen-placeholder").classList.add("hidden");
-        video.play().catch(() => {});
+        video.play().catch(err => console.warn("[webrtc] autoplay blocked:", err));
         document.getElementById("unmute-btn").classList.remove("hidden");
       };
       pc.onicecandidate = (e) => {
         if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "ice", data: e.candidate } });
       };
       await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+      // Flush any ICE candidates that arrived before the offer did.
+      const queued = state.pendingCandidates.get("__student") || [];
+      for (const c of queued) { try { await pc.addIceCandidate(c); } catch (e) { console.warn("[webrtc] queued ICE candidate rejected:", e); } }
+      state.pendingCandidates.set("__student", []);
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "answer", data: answer } });
       pc.onconnectionstatechange = () => {
+        console.log("[webrtc] student connection state:", pc.connectionState);
         const ph = document.getElementById("screen-placeholder");
         if (pc.connectionState === "connecting") { ph.textContent = "Connecting to the teacher's screen…"; ph.classList.remove("hidden"); }
         else if (pc.connectionState === "connected") { ph.classList.add("hidden"); }
@@ -751,16 +887,33 @@ async function handleSignal(ch, payload) {
           ph.classList.remove("hidden");
         }
       };
-    } else if (payload.kind === "ice" && state.peerConnection) {
-      try { await state.peerConnection.addIceCandidate(payload.data); } catch (e) {}
+    } else if (payload.kind === "ice") {
+      if (state.peerConnection && state.peerConnection.remoteDescription) {
+        try { await state.peerConnection.addIceCandidate(payload.data); }
+        catch (e) { console.warn("[webrtc] addIceCandidate failed:", e); }
+      } else {
+        // Offer hasn't arrived/been applied yet — queue for later.
+        const q = state.pendingCandidates.get("__student") || [];
+        q.push(payload.data);
+        state.pendingCandidates.set("__student", q);
+      }
     }
   } else {
     const pc = state.peerConnections.get(payload.from);
     if (!pc) return;
     if (payload.kind === "answer") {
       await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+      const queued = state.pendingCandidates.get(payload.from) || [];
+      for (const c of queued) { try { await pc.addIceCandidate(c); } catch (e) { console.warn("[webrtc] queued ICE candidate rejected:", e); } }
+      state.pendingCandidates.set(payload.from, []);
     } else if (payload.kind === "ice") {
-      try { await pc.addIceCandidate(payload.data); } catch (e) {}
+      if (pc.remoteDescription) {
+        try { await pc.addIceCandidate(payload.data); } catch (e) { console.warn("[webrtc] addIceCandidate failed:", e); }
+      } else {
+        const q = state.pendingCandidates.get(payload.from) || [];
+        q.push(payload.data);
+        state.pendingCandidates.set(payload.from, q);
+      }
     }
   }
 }
@@ -768,6 +921,7 @@ async function handleSignal(ch, payload) {
 function resetScreenPanel() {
   document.getElementById("remote-video").classList.add("hidden");
   document.getElementById("screen-placeholder").classList.remove("hidden");
+  document.getElementById("screen-placeholder").textContent = "Waiting for the teacher to start screen share…";
   document.getElementById("unmute-btn").classList.add("hidden");
 }
 
