@@ -528,7 +528,11 @@ function extractYoutubeId(url) {
 
 async function joinRealtimeChannel(classId) {
   const ch = supabase.channel(`class:${classId}`, {
-    config: { presence: { key: state.user.id } }
+    config: {
+      presence: { key: state.user.id, enabled: true },
+      broadcast: { self: true },
+      private: true
+    }
   });
 
   ch.on("presence", { event: "sync" }, () => {
