@@ -647,11 +647,16 @@ async function startScreenShare() {
   } catch (e) { return; }
 
   // Screen capture does NOT include the microphone — grab it separately.
+  // Timeout so a missed/ignored mic permission prompt can't block the
+  // video from reaching students — sharing proceeds without voice if so.
   let micStream = null;
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await Promise.race([
+      navigator.mediaDevices.getUserMedia({ audio: true }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("mic-timeout")), 8000))
+    ]);
   } catch (e) {
-    // Mic permission denied or unavailable — sharing continues without voice.
+    // Mic permission denied, unavailable, or not answered in time.
   }
 
   const videoTrack = state.localStream.getVideoTracks()[0];
