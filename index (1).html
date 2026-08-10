@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GIT Group Training Console</title>
+<style>
+  :root{
+    --navy:#101B33;
+    --navy-2:#1B2A4E;
+    --teal:#2FB8AC;
+    --amber:#F2A93B;
+    --bg:#F5F7FA;
+    --card:#FFFFFF;
+    --ink:#1B2333;
+    --ink-soft:#5B6478;
+    --line:#E3E7EF;
+    --danger:#D64545;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    background:var(--bg); color:var(--ink);
+  }
+  a{color:inherit;}
+  .hidden{display:none !important;}
+  button{
+    font-family:inherit; cursor:pointer; border:none; border-radius:8px;
+    padding:10px 16px; font-size:14px; font-weight:600; transition:filter .15s;
+  }
+  button:hover{filter:brightness(0.95);}
+  button:disabled{opacity:.5; cursor:not-allowed;}
+  .btn-primary{background:var(--navy); color:#fff;}
+  .btn-teal{background:var(--teal); color:#08312D;}
+  .btn-amber{background:var(--amber); color:#3A2600;}
+  .btn-danger{background:var(--danger); color:#fff;}
+  .btn-ghost{background:transparent; color:var(--navy); border:1px solid var(--line);}
+  input[type=text],input[type=email],input[type=password],textarea{
+    width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
+    font-size:14px; font-family:inherit; background:#fff; color:var(--ink);
+  }
+  textarea{resize:vertical; min-height:90px;}
+  label{font-size:13px; font-weight:600; color:var(--ink-soft); display:block; margin:14px 0 6px;}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px;}
+
+  /* topbar */
+  .topbar{
+    background:var(--navy); color:#fff; padding:14px 24px; display:flex;
+    align-items:center; justify-content:space-between;
+  }
+  .brand{font-weight:800; letter-spacing:.3px; font-size:18px;}
+  .brand span{color:var(--teal);}
+  .topbar-right{display:flex; align-items:center; gap:14px; font-size:13px;}
+  .pill{background:rgba(255,255,255,.1); padding:4px 10px; border-radius:999px; font-size:12px;}
+
+  /* auth screen */
+  .auth-wrap{min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--navy);}
+  .auth-box{width:380px; background:#fff; border-radius:16px; padding:32px;}
+  .auth-tabs{display:flex; gap:8px; margin-bottom:18px;}
+  .auth-tab{flex:1; text-align:center; padding:8px; border-radius:8px; background:var(--bg); font-weight:600; font-size:13px; color:var(--ink-soft); cursor:pointer;}
+  .auth-tab.active{background:var(--navy); color:#fff;}
+  .err{color:var(--danger); font-size:13px; margin-top:8px;}
+  .msg{color:var(--teal); font-size:13px; margin-top:8px;}
+
+  /* layout */
+  .shell{max-width:1100px; margin:0 auto; padding:28px 20px;}
+  .grid-classes{display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:16px; margin-top:16px;}
+  .class-card{background:#fff; border:1px solid var(--line); border-radius:14px; padding:18px;}
+  .status-dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;}
+  .status-live{background:var(--danger); animation:pulse 1.4s infinite;}
+  .status-scheduled{background:var(--ink-soft);}
+  .status-ended{background:#9CA3AF;}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(214,69,69,.5);}70%{box-shadow:0 0 0 8px rgba(214,69,69,0);}100%{box-shadow:0 0 0 0 rgba(214,69,69,0);}}
+
+  /* classroom */
+  .classroom{display:grid; grid-template-columns:2.2fr 1fr; gap:16px; padding:20px; max-width:1400px; margin:0 auto;}
+  @media (max-width:900px){.classroom{grid-template-columns:1fr;}}
+  .steps-bar{display:flex; gap:6px; overflow-x:auto; padding-bottom:10px;}
+  .step-chip{
+    flex:0 0 auto; padding:6px 12px; border-radius:999px; font-size:12px; font-weight:600;
+    background:var(--bg); color:var(--ink-soft); border:1px solid var(--line); white-space:nowrap;
+  }
+  .step-chip.current{background:var(--teal); color:#08312D; border-color:var(--teal);}
+  .step-chip.done{background:var(--navy-2); color:#fff; border-color:var(--navy-2);}
+  .screen-panel{background:#0B1220; border-radius:14px; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; overflow:hidden; position:relative;}
+  .screen-panel video{width:100%; height:100%; object-fit:contain;}
+  .screen-placeholder{color:#8B93A7; font-size:14px; text-align:center; padding:20px;}
+  .side-card{background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:14px;}
+  .roster-row{display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13px; border-bottom:1px solid var(--line);}
+  .roster-row:last-child{border-bottom:none;}
+  h1,h2,h3{margin:0 0 6px;}
+  .muted{color:var(--ink-soft); font-size:13px;}
+  .flex-between{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+  .row-gap{display:flex; gap:8px; flex-wrap:wrap;}
+  iframe.yt{width:100%; aspect-ratio:16/9; border:none; border-radius:10px;}
+  .banner{background:#FFF7E8; border:1px solid var(--amber); color:#6B4A00; padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:16px;}
+</style>
+</head>
+<body>
+
+<!-- ============================================================= -->
+<!-- CONFIG — fill these in once your Supabase project exists      -->
+<!-- ============================================================= -->
+<script>
+  window.APP_CONFIG = {
+    SUPABASE_URL: "https://upylfwsatrjwcjvxfmim.supabase.co",
+    SUPABASE_ANON_KEY: "sb_publishable_KWf4933thzCwciEEwg9J6w_R0MwPi9_"
+  };
+</script>
+
+<div id="config-banner" class="banner hidden" style="margin:16px;">
+  ⚠️ This app isn't connected to Supabase yet. Open <code>index.html</code>, find the
+  <code>APP_CONFIG</code> block near the top, and paste in your project URL and anon key
+  from Supabase → Project Settings → API. Then run <code>schema.sql</code> in the SQL Editor.
+</div>
+
+<!-- ============================================================= -->
+<!-- AUTH SCREEN                                                    -->
+<!-- ============================================================= -->
+<div id="view-auth" class="auth-wrap hidden">
+  <div class="auth-box">
+    <div class="brand" style="color:var(--navy); margin-bottom:18px;">GIT <span>GROUP</span> · Training Console</div>
+    <div class="auth-tabs">
+      <div class="auth-tab active" id="tab-login" onclick="switchAuthTab('login')">Log in</div>
+      <div class="auth-tab" id="tab-signup" onclick="switchAuthTab('signup')">Create account</div>
+    </div>
+
+    <div id="pane-login">
+      <label>Email</label>
+      <input type="email" id="login-email" placeholder="you@example.com" />
+      <label>Password</label>
+      <input type="password" id="login-password" placeholder="••••••••" />
+      <button class="btn-primary" style="width:100%; margin-top:18px;" onclick="doLogin()">Log in</button>
+    </div>
+
+    <div id="pane-signup" class="hidden">
+      <label>Full name</label>
+      <input type="text" id="signup-name" placeholder="Frank Ssemakula" />
+      <label>Email</label>
+      <input type="email" id="signup-email" placeholder="you@example.com" />
+      <label>Password</label>
+      <input type="password" id="signup-password" placeholder="Minimum 6 characters" />
+      <button class="btn-primary" style="width:100%; margin-top:18px;" onclick="doSignup()">Create account</button>
+      <p class="muted" style="margin-top:10px;">New accounts start as students. An admin promotes accounts to admin via SQL (see schema.sql).</p>
+    </div>
+    <div id="auth-error" class="err"></div>
+    <div id="auth-msg" class="msg"></div>
+  </div>
+</div>
+
+<!-- ============================================================= -->
+<!-- APP SHELL (shown once logged in)                               -->
+<!-- ============================================================= -->
+<div id="view-app" class="hidden">
+  <div class="topbar">
+    <div class="brand">GIT <span>GROUP</span> · Training Console</div>
+    <div class="topbar-right">
+      <span class="pill" id="who-pill"></span>
+      <button class="btn-ghost" style="padding:6px 12px;" onclick="signOut()">Log out</button>
+    </div>
+  </div>
+
+  <!-- ADMIN DASHBOARD -->
+  <div id="view-admin" class="shell hidden">
+    <div class="flex-between">
+      <div>
+        <h1>Your classes</h1>
+        <p class="muted">Create a session, add a step-by-step guide, then start it when you're ready to teach.</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px;">
+      <h3>Schedule a new class</h3>
+      <label>Title</label>
+      <input type="text" id="new-title" placeholder="Intro to AI for Health Sciences" />
+      <label>Description</label>
+      <textarea id="new-desc" placeholder="What students will learn in this session"></textarea>
+      <label>Step-by-step guide (one step per line — students will follow along live)</label>
+      <textarea id="new-steps" placeholder="Welcome & objectives&#10;What is Artificial Intelligence?&#10;Demo: AI in patient diagnostics&#10;Hands-on exercise&#10;Q&A and wrap-up" style="min-height:120px;"></textarea>
+      <button class="btn-primary" style="margin-top:14px;" onclick="createClass()">Create class</button>
+    </div>
+
+    <div id="admin-class-list" class="grid-classes"></div>
+  </div>
+
+  <!-- STUDENT DASHBOARD -->
+  <div id="view-student" class="shell hidden">
+    <h1>Your classes</h1>
+    <p class="muted">Join a live class below. Attendance is recorded automatically.</p>
+    <div id="student-class-list" class="grid-classes"></div>
+  </div>
+
+  <!-- LIVE CLASSROOM -->
+  <div id="view-classroom" class="hidden">
+    <div class="shell" style="max-width:1400px;">
+      <div class="flex-between" style="margin-bottom:6px;">
+        <div>
+          <button class="btn-ghost" style="padding:4px 10px; font-size:12px;" onclick="leaveClassroom()">← Back</button>
+          <h2 id="classroom-title" style="display:inline; margin-left:10px;"></h2>
+        </div>
+        <div class="row-gap" id="admin-controls"></div>
+      </div>
+
+      <div class="steps-bar" id="steps-bar"></div>
+
+      <div class="classroom">
+        <div>
+          <div class="screen-panel" id="screen-panel">
+            <div class="screen-placeholder" id="screen-placeholder">Waiting for the teacher to start screen share…</div>
+            <video id="remote-video" autoplay playsinline class="hidden"></video>
+          </div>
+          <div class="row-gap" id="teacher-share-controls" style="margin-top:10px;"></div>
+
+          <div class="side-card" style="margin-top:16px;">
+            <h3>Watch together</h3>
+            <div id="yt-embed-wrap">
+              <p class="muted" id="yt-empty">No video shared yet.</p>
+              <iframe class="yt hidden" id="yt-frame" src="" allowfullscreen></iframe>
+            </div>
+            <div id="yt-admin-controls" class="hidden" style="margin-top:10px;">
+              <label>Paste a YouTube link</label>
+              <div class="row-gap">
+                <input type="text" id="yt-input" placeholder="https://www.youtube.com/watch?v=..." />
+                <button class="btn-teal" onclick="setYoutube()">Share</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="side-card">
+            <h3>Step guide</h3>
+            <ol id="step-list" style="padding-left:18px; margin:0;"></ol>
+          </div>
+          <div class="side-card">
+            <div class="flex-between">
+              <h3 style="margin:0;">In this session</h3>
+              <span class="pill" style="background:var(--bg); color:var(--ink-soft);" id="roster-count">0</span>
+            </div>
+            <div id="roster-list" style="margin-top:8px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================= -->
+<!-- APP LOGIC                                                      -->
+<!-- ============================================================= -->
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const cfg = window.APP_CONFIG;
+const configured = cfg.SUPABASE_URL !== "YOUR_SUPABASE_PROJECT_URL" && cfg.SUPABASE_ANON_KEY !== "YOUR_SUPABASE_ANON_KEY";
+if (!configured) document.getElementById("config-banner").classList.remove("hidden");
+
+const supabase = configured ? createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY) : null;
+window.supabase = supabase;
+
+let state = {
+  user: null,
+  profile: null,
+  classes: [],
+  currentClass: null,
+  channel: null,
+  roster: new Map(),      // user_id -> {full_name, role}
+  attendanceRowId: null,
+  isSharing: false,
+  localStream: null,
+  peerConnections: new Map(), // studentId -> RTCPeerConnection (teacher side)
+  peerConnection: null,        // student side
+};
+
+const ICE_SERVERS = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+/* ---------------- AUTH ---------------- */
+
+window.switchAuthTab = (which) => {
+  document.getElementById("tab-login").classList.toggle("active", which === "login");
+  document.getElementById("tab-signup").classList.toggle("active", which === "signup");
+  document.getElementById("pane-login").classList.toggle("hidden", which !== "login");
+  document.getElementById("pane-signup").classList.toggle("hidden", which !== "signup");
+  document.getElementById("auth-error").textContent = "";
+  document.getElementById("auth-msg").textContent = "";
+};
+
+window.doLogin = async () => {
+  const email = document.getElementById("login-email").value.trim();
+  const password = document.getElementById("login-password").value;
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  document.getElementById("auth-error").textContent = error ? error.message : "";
+};
+
+window.doSignup = async () => {
+  const full_name = document.getElementById("signup-name").value.trim();
+  const email = document.getElementById("signup-email").value.trim();
+  const password = document.getElementById("signup-password").value;
+  const { error } = await supabase.auth.signUp({
+    email, password, options: { data: { full_name } }
+  });
+  if (error) { document.getElementById("auth-error").textContent = error.message; return; }
+  document.getElementById("auth-error").textContent = "";
+  document.getElementById("auth-msg").textContent = "Account created. If email confirmation is on, check your inbox, then log in.";
+};
+
+window.signOut = async () => {
+  if (state.currentClass) await leaveClassroom();
+  await supabase.auth.signOut();
+};
+
+async function loadSession() {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) await onLoggedIn(session.user);
+  else showAuth();
+
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    if (event === "SIGNED_IN" && session) await onLoggedIn(session.user);
+    if (event === "SIGNED_OUT") showAuth();
+  });
+}
+
+async function onLoggedIn(user) {
+  state.user = user;
+  const { data: profile } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+  state.profile = profile;
+  document.getElementById("view-auth").classList.add("hidden");
+  document.getElementById("view-app").classList.remove("hidden");
+  document.getElementById("who-pill").textContent = `${profile?.full_name || user.email} · ${profile?.role || "student"}`;
+  if (profile?.role === "admin") { showAdmin(); loadAdminClasses(); }
+  else { showStudent(); loadStudentClasses(); }
+}
+
+function showAuth(){
+  document.getElementById("view-auth").classList.remove("hidden");
+  document.getElementById("view-app").classList.add("hidden");
+}
+function showAdmin(){
+  document.getElementById("view-admin").classList.remove("hidden");
+  document.getElementById("view-student").classList.add("hidden");
+  document.getElementById("view-classroom").classList.add("hidden");
+}
+function showStudent(){
+  document.getElementById("view-student").classList.remove("hidden");
+  document.getElementById("view-admin").classList.add("hidden");
+  document.getElementById("view-classroom").classList.add("hidden");
+}
+
+/* ---------------- ADMIN: CLASS MANAGEMENT ---------------- */
+
+window.createClass = async () => {
+  const title = document.getElementById("new-title").value.trim();
+  const description = document.getElementById("new-desc").value.trim();
+  const stepsRaw = document.getElementById("new-steps").value.trim();
+  if (!title) return alert("Give the class a title.");
+  const steps = stepsRaw.split("\n").map(s => s.trim()).filter(Boolean);
+  const { error } = await supabase.from("classes").insert({
+    title, description, steps, created_by: state.user.id
+  });
+  if (error) return alert(error.message);
+  document.getElementById("new-title").value = "";
+  document.getElementById("new-desc").value = "";
+  document.getElementById("new-steps").value = "";
+  loadAdminClasses();
+};
+
+async function loadAdminClasses() {
+  const { data } = await supabase.from("classes").select("*").order("created_at", { ascending: false });
+  state.classes = data || [];
+  renderAdminClasses();
+}
+
+function renderAdminClasses() {
+  const wrap = document.getElementById("admin-class-list");
+  wrap.innerHTML = "";
+  state.classes.forEach(c => {
+    const div = document.createElement("div");
+    div.className = "class-card";
+    div.innerHTML = `
+      <div class="flex-between">
+        <h3 style="margin:0;">${escapeHtml(c.title)}</h3>
+        <span><span class="status-dot status-${c.status}"></span>${c.status}</span>
+      </div>
+      <p class="muted">${escapeHtml(c.description || "")}</p>
+      <p class="muted">${c.steps.length} step(s)</p>
+      <div class="row-gap" style="margin-top:10px;">
+        ${c.status !== "ended" ? `<button class="btn-teal" data-act="enter">${c.status === "live" ? "Enter classroom" : "Start class"}</button>` : ""}
+        ${c.status === "live" ? `<button class="btn-danger" data-act="end">End class</button>` : ""}
+      </div>
+    `;
+    div.querySelector('[data-act="enter"]')?.addEventListener("click", () => startOrEnterClass(c));
+    div.querySelector('[data-act="end"]')?.addEventListener("click", () => endClass(c));
+    wrap.appendChild(div);
+  });
+}
+
+async function startOrEnterClass(c) {
+  if (c.status === "scheduled") {
+    await supabase.from("classes").update({ status: "live", started_at: new Date().toISOString(), current_step: 0 }).eq("id", c.id);
+  }
+  const { data } = await supabase.from("classes").select("*").eq("id", c.id).single();
+  enterClassroom(data);
+}
+
+async function endClass(c) {
+  await supabase.from("classes").update({ status: "ended", ended_at: new Date().toISOString() }).eq("id", c.id);
+  await downloadAttendanceCsv(c.id, c.title);
+  loadAdminClasses();
+}
+
+/* ---------------- STUDENT: CLASS LIST ---------------- */
+
+async function loadStudentClasses() {
+  const { data } = await supabase.from("classes").select("*").neq("status", "ended").order("created_at", { ascending: false });
+  state.classes = data || [];
+  renderStudentClasses();
+}
+
+function renderStudentClasses() {
+  const wrap = document.getElementById("student-class-list");
+  wrap.innerHTML = "";
+  state.classes.forEach(c => {
+    const div = document.createElement("div");
+    div.className = "class-card";
+    div.innerHTML = `
+      <div class="flex-between">
+        <h3 style="margin:0;">${escapeHtml(c.title)}</h3>
+        <span><span class="status-dot status-${c.status}"></span>${c.status}</span>
+      </div>
+      <p class="muted">${escapeHtml(c.description || "")}</p>
+      <div class="row-gap" style="margin-top:10px;">
+        ${c.status === "live" ? `<button class="btn-teal" data-act="join">Join live class</button>` : `<button class="btn-ghost" disabled>Not started yet</button>`}
+      </div>
+    `;
+    div.querySelector('[data-act="join"]')?.addEventListener("click", () => enterClassroom(c));
+    wrap.appendChild(div);
+  });
+}
+
+/* ---------------- CLASSROOM (shared) ---------------- */
+
+async function enterClassroom(c) {
+  state.currentClass = c;
+  document.getElementById("view-admin").classList.add("hidden");
+  document.getElementById("view-student").classList.add("hidden");
+  document.getElementById("view-classroom").classList.remove("hidden");
+  document.getElementById("classroom-title").textContent = c.title;
+
+  renderSteps(c.steps, c.current_step);
+  resetScreenPanel();
+  document.getElementById("yt-frame").classList.add("hidden");
+  document.getElementById("yt-empty").classList.remove("hidden");
+
+  const isAdmin = state.profile.role === "admin";
+  document.getElementById("admin-controls").innerHTML = isAdmin ? `
+    <button class="btn-ghost" onclick="stepChange(-1)">◀ Prev step</button>
+    <button class="btn-ghost" onclick="stepChange(1)">Next step ▶</button>
+  ` : "";
+  document.getElementById("yt-admin-controls").classList.toggle("hidden", !isAdmin);
+  document.getElementById("teacher-share-controls").innerHTML = isAdmin ? `
+    <button class="btn-amber" id="share-btn" onclick="toggleScreenShare()">Start screen share</button>
+  ` : "";
+
+  await joinRealtimeChannel(c.id);
+  if (!isAdmin) await recordAttendanceJoin(c.id);
+}
+
+window.leaveClassroom = async () => {
+  const c = state.currentClass;
+  if (c && state.profile.role !== "admin") await recordAttendanceLeave();
+  await teardownChannel();
+  state.currentClass = null;
+  document.getElementById("view-classroom").classList.add("hidden");
+  if (state.profile.role === "admin") { showAdmin(); loadAdminClasses(); }
+  else { showStudent(); loadStudentClasses(); }
+};
+
+function renderSteps(steps, currentIdx) {
+  const bar = document.getElementById("steps-bar");
+  const list = document.getElementById("step-list");
+  bar.innerHTML = "";
+  list.innerHTML = "";
+  steps.forEach((s, i) => {
+    const chip = document.createElement("div");
+    chip.className = "step-chip" + (i === currentIdx ? " current" : i < currentIdx ? " done" : "");
+    chip.textContent = `${i + 1}`;
+    bar.appendChild(chip);
+
+    const li = document.createElement("li");
+    li.style.marginBottom = "8px";
+    li.style.fontWeight = i === currentIdx ? "700" : "400";
+    li.style.color = i === currentIdx ? "var(--navy)" : (i < currentIdx ? "var(--ink-soft)" : "var(--ink)");
+    li.textContent = s;
+    list.appendChild(li);
+  });
+}
+
+window.stepChange = async (delta) => {
+  const c = state.currentClass;
+  const next = Math.max(0, Math.min(c.steps.length - 1, c.current_step + delta));
+  c.current_step = next;
+  await supabase.from("classes").update({ current_step: next }).eq("id", c.id);
+  state.channel.send({ type: "broadcast", event: "step-change", payload: { step: next } });
+  renderSteps(c.steps, next);
+};
+
+window.setYoutube = () => {
+  const url = document.getElementById("yt-input").value.trim();
+  const id = extractYoutubeId(url);
+  if (!id) return alert("That doesn't look like a valid YouTube link.");
+  applyYoutube(id);
+  state.channel.send({ type: "broadcast", event: "youtube-set", payload: { id } });
+};
+
+function applyYoutube(id) {
+  const frame = document.getElementById("yt-frame");
+  frame.src = `https://www.youtube.com/embed/${id}`;
+  frame.classList.remove("hidden");
+  document.getElementById("yt-empty").classList.add("hidden");
+}
+
+function extractYoutubeId(url) {
+  const m = url.match(/(?:youtu\.be\/|v=|embed\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : (/^[a-zA-Z0-9_-]{11}$/.test(url) ? url : null);
+}
+
+/* ---------------- REALTIME: presence, step sync, youtube sync, signalling ---------------- */
+
+async function joinRealtimeChannel(classId) {
+  const ch = supabase.channel(`class:${classId}`, {
+    config: { presence: { key: state.user.id } }
+  });
+
+  ch.on("presence", { event: "sync" }, () => {
+    const presenceState = ch.presenceState();
+    state.roster.clear();
+    Object.entries(presenceState).forEach(([uid, metas]) => {
+      state.roster.set(uid, metas[0]);
+    });
+    renderRoster();
+    if (state.profile.role === "admin") maintainTeacherConnections(ch);
+  });
+
+  ch.on("broadcast", { event: "step-change" }, ({ payload }) => {
+    state.currentClass.current_step = payload.step;
+    renderSteps(state.currentClass.steps, payload.step);
+  });
+
+  ch.on("broadcast", { event: "youtube-set" }, ({ payload }) => applyYoutube(payload.id));
+
+  ch.on("broadcast", { event: "webrtc-signal" }, ({ payload }) => handleSignal(ch, payload));
+
+  ch.subscribe(async (status) => {
+    if (status === "SUBSCRIBED") {
+      await ch.track({ user_id: state.user.id, full_name: state.profile.full_name, role: state.profile.role });
+    }
+  });
+
+  state.channel = ch;
+}
+
+async function teardownChannel() {
+  if (state.isSharing) stopScreenShare();
+  state.peerConnections.forEach(pc => pc.close());
+  state.peerConnections.clear();
+  if (state.peerConnection) { state.peerConnection.close(); state.peerConnection = null; }
+  if (state.channel) { await state.channel.untrack(); await supabase.removeChannel(state.channel); state.channel = null; }
+  state.roster.clear();
+}
+
+function renderRoster() {
+  const list = document.getElementById("roster-list");
+  const count = document.getElementById("roster-count");
+  const entries = [...state.roster.values()];
+  count.textContent = entries.length;
+  list.innerHTML = entries.map(p => `
+    <div class="roster-row"><span class="status-dot status-live"></span>${escapeHtml(p.full_name)} ${p.role === "admin" ? "· teacher" : ""}</div>
+  `).join("");
+}
+
+/* ---------------- ATTENDANCE ---------------- */
+
+async function recordAttendanceJoin(classId) {
+  const { data, error } = await supabase.from("attendance").insert({
+    class_id: classId, user_id: state.user.id, full_name: state.profile.full_name
+  }).select().single();
+  if (!error) state.attendanceRowId = data.id;
+}
+
+async function recordAttendanceLeave() {
+  if (!state.attendanceRowId) return;
+  await supabase.from("attendance").update({ left_at: new Date().toISOString() }).eq("id", state.attendanceRowId);
+  state.attendanceRowId = null;
+}
+
+async function downloadAttendanceCsv(classId, title) {
+  const { data } = await supabase.from("attendance").select("*").eq("class_id", classId).order("joined_at");
+  if (!data || !data.length) { alert("No attendance was recorded for this class."); return; }
+  const rows = [["Name", "Joined at", "Left at", "Duration (min)"]];
+  data.forEach(r => {
+    const joined = new Date(r.joined_at);
+    const left = r.left_at ? new Date(r.left_at) : null;
+    const mins = left ? Math.round((left - joined) / 60000) : "";
+    rows.push([r.full_name, joined.toLocaleString(), left ? left.toLocaleString() : "", mins]);
+  });
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `attendance-${title.replace(/\s+/g, "_")}.csv`;
+  a.click();
+}
+
+/* ---------------- SCREEN SHARE (WebRTC mesh, teacher -> each student) ---------------- */
+
+window.toggleScreenShare = () => state.isSharing ? stopScreenShare() : startScreenShare();
+
+async function startScreenShare() {
+  try {
+    state.localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  } catch (e) { return; }
+  state.isSharing = true;
+  document.getElementById("share-btn").textContent = "Stop screen share";
+  state.localStream.getVideoTracks()[0].addEventListener("ended", stopScreenShare);
+  maintainTeacherConnections(state.channel);
+}
+
+function stopScreenShare() {
+  state.isSharing = false;
+  const btn = document.getElementById("share-btn");
+  if (btn) btn.textContent = "Start screen share";
+  state.localStream?.getTracks().forEach(t => t.stop());
+  state.localStream = null;
+  state.peerConnections.forEach(pc => pc.close());
+  state.peerConnections.clear();
+}
+
+// Teacher: ensure a peer connection (with current stream) exists for every student in roster
+function maintainTeacherConnections(ch) {
+  if (!state.isSharing) return;
+  state.roster.forEach((p, uid) => {
+    if (uid === state.user.id) return;
+    if (!state.peerConnections.has(uid)) createTeacherConnection(ch, uid);
+  });
+}
+
+async function createTeacherConnection(ch, studentId) {
+  const pc = new RTCPeerConnection(ICE_SERVERS);
+  state.peerConnections.set(studentId, pc);
+  state.localStream.getTracks().forEach(t => pc.addTrack(t, state.localStream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "ice", data: e.candidate } });
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "offer", data: offer } });
+}
+
+// Shared signal handler for both roles
+async function handleSignal(ch, payload) {
+  if (payload.to !== state.user.id) return;
+  const isAdmin = state.profile.role === "admin";
+
+  if (!isAdmin) {
+    if (payload.kind === "offer") {
+      const pc = new RTCPeerConnection(ICE_SERVERS);
+      state.peerConnection = pc;
+      pc.ontrack = (e) => {
+        const video = document.getElementById("remote-video");
+        video.srcObject = e.streams[0];
+        video.classList.remove("hidden");
+        document.getElementById("screen-placeholder").classList.add("hidden");
+      };
+      pc.onicecandidate = (e) => {
+        if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "ice", data: e.candidate } });
+      };
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "answer", data: answer } });
+    } else if (payload.kind === "ice" && state.peerConnection) {
+      try { await state.peerConnection.addIceCandidate(payload.data); } catch (e) {}
+    }
+  } else {
+    const pc = state.peerConnections.get(payload.from);
+    if (!pc) return;
+    if (payload.kind === "answer") {
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+    } else if (payload.kind === "ice") {
+      try { await pc.addIceCandidate(payload.data); } catch (e) {}
+    }
+  }
+}
+
+function resetScreenPanel() {
+  document.getElementById("remote-video").classList.add("hidden");
+  document.getElementById("screen-placeholder").classList.remove("hidden");
+}
+
+/* ---------------- utils ---------------- */
+function escapeHtml(str) {
+  return (str || "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+}
+
+window.addEventListener("beforeunload", () => { if (state.attendanceRowId) navigator.sendBeacon && recordAttendanceLeave(); });
+
+if (configured) loadSession();
+else document.getElementById("view-auth").classList.remove("hidden");
+</script>
+</body>
+</html>
