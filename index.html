@@ -207,7 +207,8 @@
         <div>
           <div class="screen-panel" id="screen-panel">
             <div class="screen-placeholder" id="screen-placeholder">Waiting for the teacher to start screen share…</div>
-            <video id="remote-video" autoplay playsinline class="hidden"></video>
+            <video id="remote-video" autoplay playsinline muted class="hidden"></video>
+            <button id="unmute-btn" class="btn-amber hidden" style="position:absolute; bottom:10px; right:10px;" onclick="unmuteScreen()">🔊 Turn on sound</button>
           </div>
           <div class="row-gap" id="teacher-share-controls" style="margin-top:10px;"></div>
 
@@ -272,7 +273,25 @@ let state = {
   peerConnection: null,        // student side
 };
 
-const ICE_SERVERS = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    // Free public TURN relay — helps connections succeed across different
+    // networks/routers (school wifi, home wifi, mobile data, etc.) where
+    // STUN alone often fails. Fine to start with; swap for your own TURN
+    // server later if you outgrow the free tier.
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject"
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject"
+    }
+  ]
+};
 
 /* ---------------- AUTH ---------------- */
 
@@ -621,7 +640,10 @@ window.toggleScreenShare = () => state.isSharing ? stopScreenShare() : startScre
 
 async function startScreenShare() {
   try {
-    state.localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    state.localStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
+    });
   } catch (e) { return; }
   state.isSharing = true;
   document.getElementById("share-btn").textContent = "Stop screen share";
@@ -672,8 +694,11 @@ async function handleSignal(ch, payload) {
       pc.ontrack = (e) => {
         const video = document.getElementById("remote-video");
         video.srcObject = e.streams[0];
+        video.muted = true;
         video.classList.remove("hidden");
         document.getElementById("screen-placeholder").classList.add("hidden");
+        video.play().catch(() => {});
+        document.getElementById("unmute-btn").classList.remove("hidden");
       };
       pc.onicecandidate = (e) => {
         if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "ice", data: e.candidate } });
@@ -682,6 +707,15 @@ async function handleSignal(ch, payload) {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "answer", data: answer } });
+      pc.onconnectionstatechange = () => {
+        const ph = document.getElementById("screen-placeholder");
+        if (pc.connectionState === "connecting") { ph.textContent = "Connecting to the teacher's screen…"; ph.classList.remove("hidden"); }
+        else if (pc.connectionState === "connected") { ph.classList.add("hidden"); }
+        else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+          ph.textContent = "Connection dropped — try leaving and rejoining the class.";
+          ph.classList.remove("hidden");
+        }
+      };
     } else if (payload.kind === "ice" && state.peerConnection) {
       try { await state.peerConnection.addIceCandidate(payload.data); } catch (e) {}
     }
@@ -699,7 +733,15 @@ async function handleSignal(ch, payload) {
 function resetScreenPanel() {
   document.getElementById("remote-video").classList.add("hidden");
   document.getElementById("screen-placeholder").classList.remove("hidden");
+  document.getElementById("unmute-btn").classList.add("hidden");
 }
+
+window.unmuteScreen = () => {
+  const video = document.getElementById("remote-video");
+  video.muted = false;
+  video.play().catch(() => {});
+  document.getElementById("unmute-btn").classList.add("hidden");
+};
 
 /* ---------------- utils ---------------- */
 function escapeHtml(str) {
