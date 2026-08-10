@@ -642,12 +642,37 @@ async function startScreenShare() {
   try {
     state.localStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: true
+      audio: true // system/tab audio, if the presenter ticks "share audio" — not the mic
     });
   } catch (e) { return; }
+
+  // Screen capture does NOT include the microphone — grab it separately.
+  let micStream = null;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    // Mic permission denied or unavailable — sharing continues without voice.
+  }
+
+  const videoTrack = state.localStream.getVideoTracks()[0];
+  const displayAudioTrack = state.localStream.getAudioTracks()[0]; // may not exist
+
+  // Mix mic + any display audio into a single outbound audio track.
+  let outboundAudioTrack = null;
+  if (micStream || displayAudioTrack) {
+    const audioCtx = new AudioContext();
+    const dest = audioCtx.createMediaStreamDestination();
+    if (micStream) audioCtx.createMediaStreamSource(micStream).connect(dest);
+    if (displayAudioTrack) audioCtx.createMediaStreamSource(new MediaStream([displayAudioTrack])).connect(dest);
+    outboundAudioTrack = dest.stream.getAudioTracks()[0];
+    state.audioCtx = audioCtx;
+  }
+
+  state.micStream = micStream;
+  state.outboundStream = new MediaStream(outboundAudioTrack ? [videoTrack, outboundAudioTrack] : [videoTrack]);
   state.isSharing = true;
   document.getElementById("share-btn").textContent = "Stop screen share";
-  state.localStream.getVideoTracks()[0].addEventListener("ended", stopScreenShare);
+  videoTrack.addEventListener("ended", stopScreenShare);
   maintainTeacherConnections(state.channel);
 }
 
@@ -656,7 +681,12 @@ function stopScreenShare() {
   const btn = document.getElementById("share-btn");
   if (btn) btn.textContent = "Start screen share";
   state.localStream?.getTracks().forEach(t => t.stop());
+  state.micStream?.getTracks().forEach(t => t.stop());
+  state.audioCtx?.close();
   state.localStream = null;
+  state.micStream = null;
+  state.outboundStream = null;
+  state.audioCtx = null;
   state.peerConnections.forEach(pc => pc.close());
   state.peerConnections.clear();
 }
@@ -673,7 +703,7 @@ function maintainTeacherConnections(ch) {
 async function createTeacherConnection(ch, studentId) {
   const pc = new RTCPeerConnection(ICE_SERVERS);
   state.peerConnections.set(studentId, pc);
-  state.localStream.getTracks().forEach(t => pc.addTrack(t, state.localStream));
+  state.outboundStream.getTracks().forEach(t => pc.addTrack(t, state.outboundStream));
   pc.onicecandidate = (e) => {
     if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "ice", data: e.candidate } });
   };
