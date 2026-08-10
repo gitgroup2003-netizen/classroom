@@ -698,6 +698,29 @@ async function startScreenShare() {
     return;
   }
 
+  // Ask for the microphone FIRST, as its own clear step — before the OS
+  // screen-picker dialog even opens. If we ask for it *after* the screen
+  // picker (as this used to), the teacher has just finished one permission
+  // dialog and very often doesn't react to a second one in time, so it
+  // silently times out and sharing proceeds with video + system audio but
+  // no voice. Asking first avoids that, and once granted, the browser
+  // remembers it for this site — future shares get it instantly with no
+  // prompt at all.
+  let micStream = null;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    console.warn("[audio] mic unavailable:", e.name || e.message);
+    setShareStatus(
+      e.name === "NotAllowedError"
+        ? "Microphone permission was denied — your voice won't be heard. Check the site's mic permission (click the 🔒 icon in the address bar) and try again."
+        : e.name === "NotFoundError"
+        ? "No microphone was found on this device — your voice won't be heard."
+        : `Microphone unavailable (${e.name || e.message}) — your voice won't be heard.`,
+      true
+    );
+  }
+
   try {
     state.localStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
@@ -711,20 +734,8 @@ async function startScreenShare() {
         : `Couldn't start screen share (${e.name || e.message}).`,
       true
     );
+    micStream?.getTracks().forEach(t => t.stop());
     return;
-  }
-
-  // Screen capture does NOT include the microphone — grab it separately.
-  // Timeout so a missed/ignored mic permission prompt can't block the
-  // video from reaching students — sharing proceeds without voice if so.
-  let micStream = null;
-  try {
-    micStream = await Promise.race([
-      navigator.mediaDevices.getUserMedia({ audio: true }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("mic-timeout")), 8000))
-    ]);
-  } catch (e) {
-    console.warn("[screenshare] mic unavailable, continuing video-only audio-wise:", e.message || e);
   }
 
   const videoTrack = state.localStream.getVideoTracks()[0];
