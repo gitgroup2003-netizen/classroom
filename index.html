@@ -209,9 +209,18 @@
             <div class="screen-placeholder" id="screen-placeholder">Waiting for the teacher to start screen share…</div>
             <video id="remote-video" autoplay playsinline muted class="hidden"></video>
             <button id="unmute-btn" class="btn-amber hidden" style="position:absolute; bottom:10px; right:10px;" onclick="unmuteScreen()">🔊 Turn on sound</button>
+            <button id="talk-btn" class="btn-amber hidden" style="position:absolute; bottom:10px; left:10px;"
+              onpointerdown="startTalking()" onpointerup="stopTalking()" onpointerleave="stopTalking()" onpointercancel="stopTalking()">🎤 Hold to talk</button>
           </div>
           <div class="row-gap" id="teacher-share-controls" style="margin-top:10px; align-items:center;"></div>
           <div id="share-status" class="muted hidden" style="margin-top:6px;"></div>
+          <div id="mic-meter-row" class="hidden" style="margin-top:6px; display:flex; align-items:center; gap:8px;">
+            <span class="muted" style="font-size:12px;">🎤 Mic level:</span>
+            <div style="width:120px; height:8px; background:var(--line); border-radius:4px; overflow:hidden;">
+              <div id="mic-meter-bar" style="width:0%; height:100%; background:var(--teal); transition:width .08s linear;"></div>
+            </div>
+            <span id="mic-meter-note" class="muted" style="font-size:12px;"></span>
+          </div>
           <video id="local-preview" muted autoplay playsinline class="hidden" style="width:160px; border-radius:8px; margin-top:8px; border:1px solid var(--line);"></video>
 
           <div class="side-card" style="margin-top:16px;">
@@ -673,6 +682,8 @@ async function teardownChannel() {
   state.peerConnections.forEach(pc => pc.close());
   state.peerConnections.clear();
   state.pendingCandidates.clear();
+  document.querySelectorAll('audio[id^="student-audio-"]').forEach(el => el.remove());
+  if (state.talkStream) { state.talkStream.getTracks().forEach(t => t.stop()); state.talkStream = null; }
   if (state.peerConnection) { state.peerConnection.close(); state.peerConnection = null; }
   if (state.channel) { await state.channel.untrack(); await supabase.removeChannel(state.channel); state.channel = null; }
   state.roster.clear();
@@ -823,7 +834,21 @@ async function startScreenShare() {
       if (audioCtx.state === "suspended") await audioCtx.resume();
       const dest = audioCtx.createMediaStreamDestination();
       state.audioSourceNodes = [];
-      if (micStream) state.audioSourceNodes.push(audioCtx.createMediaStreamSource(micStream).connect(dest));
+      if (micStream) {
+        const micSource = audioCtx.createMediaStreamSource(micStream);
+        state.audioSourceNodes.push(micSource.connect(dest));
+        // Live level meter tapped off the SAME mic source that feeds the
+        // outbound mix — if this bar never moves while you talk, the
+        // browser genuinely isn't receiving signal from your mic hardware
+        // (wrong input device selected, hardware mute, or an OS/driver
+        // issue) — it's not a bug in this app, and no code fix here can
+        // help; check your OS sound settings' input device/level instead.
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        micSource.connect(analyser);
+        state.micAnalyser = analyser;
+        startMicMeter();
+      }
       if (displayAudioTrack) state.audioSourceNodes.push(audioCtx.createMediaStreamSource(new MediaStream([displayAudioTrack])).connect(dest));
       outboundAudioTrack = dest.stream.getAudioTracks()[0];
       state.audioDest = dest;
@@ -857,12 +882,49 @@ async function startScreenShare() {
   state.watchdogTimer = setInterval(() => maintainTeacherConnections(state.channel), 5000);
 }
 
+function startMicMeter() {
+  const row = document.getElementById("mic-meter-row");
+  const bar = document.getElementById("mic-meter-bar");
+  const note = document.getElementById("mic-meter-note");
+  row.classList.remove("hidden");
+  const data = new Uint8Array(state.micAnalyser.frequencyBinCount);
+  let everMoved = false;
+  let silentFrames = 0;
+  function tick() {
+    if (!state.micAnalyser) return; // stopped
+    state.micAnalyser.getByteTimeDomainData(data);
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i] - 128));
+    const pct = Math.min(100, Math.round((peak / 128) * 220));
+    bar.style.width = pct + "%";
+    if (pct > 4) { everMoved = true; silentFrames = 0; } else { silentFrames++; }
+    // After ~4s of literally zero movement, say so plainly instead of a
+    // silently flat bar the teacher might not think to watch closely.
+    if (silentFrames > 240 && !everMoved) {
+      note.textContent = "— not picking up any sound. Check your OS's selected input device and mic level/mute.";
+      note.style.color = "var(--danger)";
+    } else if (everMoved) {
+      note.textContent = "";
+    }
+    state.micMeterRaf = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+function stopMicMeter() {
+  if (state.micMeterRaf) cancelAnimationFrame(state.micMeterRaf);
+  state.micMeterRaf = null;
+  state.micAnalyser = null;
+  document.getElementById("mic-meter-row")?.classList.add("hidden");
+}
+
 function stopScreenShare() {
   const wasSharing = state.isSharing;
   state.isSharing = false;
   const btn = document.getElementById("share-btn");
   if (btn) btn.textContent = "Start screen share";
   setShareStatus("");
+  stopMicMeter();
   document.getElementById("local-preview")?.classList.add("hidden");
   if (state.watchdogTimer) { clearInterval(state.watchdogTimer); state.watchdogTimer = null; }
   state.localStream?.getTracks().forEach(t => t.stop());
@@ -876,6 +938,7 @@ function stopScreenShare() {
   state.peerConnections.forEach(pc => pc.close());
   state.peerConnections.clear();
   state.pendingCandidates.clear();
+  document.querySelectorAll('audio[id^="student-audio-"]').forEach(el => el.remove());
   // Tell students to reset their view instead of leaving a frozen frame.
   if (wasSharing && state.channel) {
     state.channel.send({ type: "broadcast", event: "screen-share-stopped", payload: {} });
@@ -909,6 +972,23 @@ async function createTeacherConnection(ch, studentId) {
   state.peerConnections.set(studentId, pc);
   state.pendingCandidates.set(studentId, []);
   state.outboundStream.getTracks().forEach(t => pc.addTrack(t, state.outboundStream));
+  // Receives a student's mic audio when they hold "Talk" — one persistent
+  // <audio> element per student, reused across every press/release so it
+  // isn't recreated each time (recreating would risk missing the autoplay
+  // gesture window and re-triggering a permission-style block).
+  pc.ontrack = (e) => {
+    if (e.track.kind !== "audio") return;
+    console.log("[webrtc] receiving mic audio from student", studentId);
+    let audioEl = document.getElementById("student-audio-" + studentId);
+    if (!audioEl) {
+      audioEl = document.createElement("audio");
+      audioEl.id = "student-audio-" + studentId;
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+    }
+    audioEl.srcObject = e.streams[0];
+    audioEl.play().catch(err => console.warn("[webrtc] couldn't autoplay student audio (needs a click on the page first):", err.name || err));
+  };
   pc.onicecandidate = (e) => {
     if (e.candidate) {
       const type = e.candidate.type; // host | srflx | relay — 'relay' means TURN is actually being used
@@ -945,6 +1025,7 @@ async function handleSignal(ch, payload) {
   if (!isAdmin) {
     if (payload.kind === "offer") {
       console.log("[webrtc] received offer from teacher");
+      state.teacherId = payload.from; // needed later to renegotiate when the student starts talking
       const pc = new RTCPeerConnection(await getIceServers());
       state.peerConnection = pc;
       state.pendingCandidates.set("__student", []);
@@ -974,6 +1055,20 @@ async function handleSignal(ch, payload) {
         }
       };
       pc.oniceconnectionstatechange = () => console.log("[webrtc] student ICE state:", pc.iceConnectionState);
+      // Fires automatically the first time the student adds their mic track
+      // (when they press "Hold to talk") — renegotiates the SAME connection
+      // instead of building a second one, so teacher<->student stays one
+      // clean peer connection carrying video+audio both ways.
+      pc.onnegotiationneeded = async () => {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: state.teacherId, from: state.user.id, kind: "offer", data: offer } });
+          console.log("[webrtc] student sent renegotiation offer (mic added)");
+        } catch (e) {
+          console.error("[webrtc] student renegotiation failed:", e);
+        }
+      };
       await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
       // Flush any ICE candidates that arrived before the offer did.
       const queued = state.pendingCandidates.get("__student") || [];
@@ -987,7 +1082,7 @@ async function handleSignal(ch, payload) {
         console.log("[webrtc] student connection state:", pc.connectionState);
         const ph = document.getElementById("screen-placeholder");
         if (pc.connectionState === "connecting") { ph.textContent = "Connecting to the teacher's screen…"; ph.classList.remove("hidden"); }
-        else if (pc.connectionState === "connected") { ph.classList.add("hidden"); }
+        else if (pc.connectionState === "connected") { ph.classList.add("hidden"); document.getElementById("talk-btn").classList.remove("hidden"); }
         else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
           ph.textContent = "Connection dropped — try leaving and rejoining the class.";
           ph.classList.remove("hidden");
@@ -1022,6 +1117,15 @@ async function handleSignal(ch, payload) {
       const queued = state.pendingCandidates.get(payload.from) || [];
       for (const c of queued) { try { await pc.addIceCandidate(c); } catch (e) { console.warn("[webrtc] queued ICE candidate rejected:", e); } }
       state.pendingCandidates.set(payload.from, []);
+    } else if (payload.kind === "offer") {
+      // A student's mic track just got added to our existing connection with
+      // them (they pressed "Talk") — this is a renegotiation offer on the
+      // SAME peer connection, not a request for a new one. Answer it in place.
+      console.log("[webrtc] renegotiation offer from student", payload.from, "(likely started talking)");
+      await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "answer", data: answer } });
     } else if (payload.kind === "ice") {
       if (pc.remoteDescription) {
         try { await pc.addIceCandidate(payload.data); } catch (e) { console.warn("[webrtc] addIceCandidate failed:", e); }
@@ -1039,6 +1143,8 @@ function resetScreenPanel() {
   document.getElementById("screen-placeholder").classList.remove("hidden");
   document.getElementById("screen-placeholder").textContent = "Waiting for the teacher to start screen share…";
   document.getElementById("unmute-btn").classList.add("hidden");
+  document.getElementById("talk-btn")?.classList.add("hidden");
+  if (state.talkStream) { state.talkStream.getTracks().forEach(t => t.stop()); state.talkStream = null; }
 }
 
 window.unmuteScreen = () => {
@@ -1046,6 +1152,43 @@ window.unmuteScreen = () => {
   video.muted = false;
   video.play().catch(() => {});
   document.getElementById("unmute-btn").classList.add("hidden");
+};
+
+// Push-to-talk: mic is captured once (on first press) and added to the
+// existing connection to the teacher — this is what triggers the
+// onnegotiationneeded handler above. Every press/release after that just
+// flips track.enabled, which needs no new permission prompt and no new
+// renegotiation, so it's instant. Deliberately hold-to-talk rather than an
+// always-on mic: with a full class, many simultaneously-open mics causes
+// feedback/echo/background noise — this keeps only one voice live at a time.
+let talkBtnPressed = false;
+window.startTalking = async () => {
+  if (talkBtnPressed) return;
+  talkBtnPressed = true;
+  const btn = document.getElementById("talk-btn");
+  try {
+    if (!state.talkStream) {
+      btn.textContent = "🎤 Requesting mic…";
+      state.talkStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const track = state.talkStream.getAudioTracks()[0];
+      track.enabled = false; // added muted; enabled below once actually pressed
+      state.peerConnection.addTrack(track, state.talkStream);
+    }
+    if (!talkBtnPressed) return; // released before mic finished acquiring
+    state.talkStream.getAudioTracks()[0].enabled = true;
+    btn.textContent = "🔴 Talking… release to stop";
+  } catch (e) {
+    console.error("[talk] mic access failed:", e);
+    btn.textContent = "🎤 Hold to talk";
+    setShareStatus?.(`Couldn't access your mic to talk (${e.name || e.message})`, true);
+    talkBtnPressed = false;
+  }
+};
+window.stopTalking = () => {
+  talkBtnPressed = false;
+  state.talkStream?.getAudioTracks().forEach(t => t.enabled = false);
+  const btn = document.getElementById("talk-btn");
+  if (btn) btn.textContent = "🎤 Hold to talk";
 };
 
 // Extra safety net: if unmuted autoplay was blocked, the very next tap or
