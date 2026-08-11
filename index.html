@@ -523,21 +523,38 @@ async function enterClassroom(c) {
 // Ask for mic permission right away (once, per browser session) instead of
 // mid-flow when the teacher clicks "Start screen share" — so that click
 // later feels instant instead of pausing on a permission prompt.
+//
+// IMPORTANT: this checks status only — it does NOT open the microphone.
+// An earlier version opened+immediately-closed the mic here to "warm" it,
+// but rapidly opening/closing/reopening the same physical mic device in
+// quick succession is known to leave some hardware (USB mics, Bluetooth
+// headsets, certain drivers) in a bad state where the SECOND capture
+// looks successful but is silently dead — exactly "no one hears my
+// voice, but other audio works" with zero errors anywhere. The
+// Permissions API reports granted/denied/prompt without ever touching
+// the device, so there's no double-open at all.
 async function ensureMicWarm() {
   const el = document.getElementById("mic-status");
-  if (state.micGranted) return;
-  try {
-    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-    s.getTracks().forEach(t => t.stop()); // just warming the permission, not staying hot
-    state.micGranted = true;
-    if (el) { el.textContent = "🎤 Mic ready"; el.style.color = "var(--ink-soft)"; }
-  } catch (e) {
-    state.micGranted = false;
-    if (el) {
-      el.innerHTML = `🎤 Mic not enabled — <a href="#" onclick="ensureMicWarm();return false;" style="color:var(--danger);">click to allow</a>`;
-    }
-    console.warn("[audio] mic warm-up failed:", e.name || e.message);
+  if (!navigator.permissions?.query) {
+    if (el) el.textContent = ""; // Permissions API for mic unsupported here (e.g. some Firefox versions) — no harm, just skip the pre-check
+    return;
   }
+  try {
+    const status = await navigator.permissions.query({ name: "microphone" });
+    applyMicStatusUI(status.state);
+    status.onchange = () => applyMicStatusUI(status.state);
+  } catch (e) {
+    console.warn("[audio] mic permission query unsupported:", e.name || e.message);
+  }
+}
+
+function applyMicStatusUI(permState) {
+  const el = document.getElementById("mic-status");
+  if (!el) return;
+  state.micGranted = permState === "granted";
+  if (permState === "granted") { el.textContent = "🎤 Mic ready"; el.style.color = "var(--ink-soft)"; }
+  else if (permState === "denied") { el.innerHTML = `🎤 Mic blocked — enable it via the 🔒 icon in your address bar`; el.style.color = "var(--danger)"; }
+  else { el.textContent = "🎤 You'll be asked for mic access when you start sharing"; el.style.color = "var(--ink-soft)"; }
 }
 
 window.leaveClassroom = async () => {
@@ -758,6 +775,10 @@ async function startScreenShare() {
   let micStream = null;
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const micTrack = micStream.getAudioTracks()[0];
+    console.log("[audio] mic track acquired:", { label: micTrack.label, enabled: micTrack.enabled, muted: micTrack.muted, readyState: micTrack.readyState, settings: micTrack.getSettings() });
+    micTrack.onmute = () => { console.warn("[audio] mic track was muted (often a hardware mute button or the OS/driver cutting it)"); setShareStatus("🎤 Mic went silent — check for a hardware mute button/switch", true); };
+    micTrack.onunmute = () => console.log("[audio] mic track unmuted");
   } catch (e) {
     console.warn("[audio] mic unavailable:", e.name || e.message);
     setShareStatus(
