@@ -278,25 +278,48 @@ let state = {
   watchdogTimer: null,         // periodically retries any missing/broken peer connections
 };
 
-// STUN-only will work when teacher & student happen to be on the same
-// network or have permissive NATs. It will NOT work in most real-world
-// cases (school wifi + home wifi + mobile data, corporate firewalls) —
-// that requires a TURN relay. The free openrelay.metered.ca credentials
-// below are known to be unreliable/rate-limited as of 2026 (see console
-// warning below and the write-up in chat). For production use, replace
-// this with your own TURN credentials (e.g. Twilio NTS, Cloudflare Calls,
-// Metered.ca with an API key, or a self-hosted coturn box).
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-    {
-      urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443", "turn:openrelay.metered.ca:443?transport=tcp"],
-      username: "openrelayproject",
-      credential: "openrelayproject"
+// ── TURN configuration ───────────────────────────────────────────────
+// STUN alone only works when both sides happen to have permissive NATs
+// (often true on the same wifi, rarely true across real networks/mobile
+// data/corporate firewalls). Real cross-network connections need a TURN
+// relay. Sign up free at https://www.metered.ca/tools/openrelay/, grab
+// your API key, and paste it below — the app will fetch fresh, working
+// TURN credentials automatically. Leave it blank and the app falls back
+// to the old static openrelay credentials, which are deprecated and
+// frequently fail (this is why you saw "Connecting..." hang forever).
+const METERED_API_KEY = "600c02f510d81673ad98b5531d7794ed8948";
+const METERED_CREDENTIALS_URL = "https://gitgroupclasses.metered.live/api/v1/turn/credentials?apiKey=" + METERED_API_KEY;
+
+let _iceServersCache = null;
+async function getIceServers() {
+  if (_iceServersCache) return _iceServersCache;
+  const stun = [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun.cloudflare.com:3478" }];
+  if (METERED_API_KEY) {
+    try {
+      const res = await fetch(METERED_CREDENTIALS_URL);
+      if (!res.ok) throw new Error(`credentials fetch failed: ${res.status}`);
+      const turnServers = await res.json();
+      console.log("[webrtc] fetched live TURN credentials from Metered");
+      _iceServersCache = { iceServers: [...stun, ...turnServers] };
+      return _iceServersCache;
+    } catch (e) {
+      console.error("[webrtc] failed to fetch TURN credentials, falling back to static creds:", e);
     }
-  ]
-};
+  } else {
+    console.warn("[webrtc] no METERED_API_KEY set — using deprecated static openrelay credentials, which frequently fail across real networks. See the comment above ICE config.");
+  }
+  _iceServersCache = {
+    iceServers: [
+      ...stun,
+      {
+        urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443", "turn:openrelay.metered.ca:443?transport=tcp"],
+        username: "openrelayproject",
+        credential: "openrelayproject"
+      }
+    ]
+  };
+  return _iceServersCache;
+}
 
 /* ---------------- AUTH ---------------- */
 
@@ -861,13 +884,18 @@ function updateShareStatus() {
 
 async function createTeacherConnection(ch, studentId) {
   console.log("[webrtc] creating offer for", studentId);
-  const pc = new RTCPeerConnection(ICE_SERVERS);
+  const pc = new RTCPeerConnection(await getIceServers());
   state.peerConnections.set(studentId, pc);
   state.pendingCandidates.set(studentId, []);
   state.outboundStream.getTracks().forEach(t => pc.addTrack(t, state.outboundStream));
   pc.onicecandidate = (e) => {
-    if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "ice", data: e.candidate } });
+    if (e.candidate) {
+      const type = e.candidate.type; // host | srflx | relay — 'relay' means TURN is actually being used
+      console.log("[webrtc] teacher->", studentId, "local candidate:", type, e.candidate.candidate);
+      ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "ice", data: e.candidate } });
+    }
   };
+  pc.oniceconnectionstatechange = () => console.log("[webrtc] teacher->", studentId, "ICE state:", pc.iceConnectionState);
   pc.onconnectionstatechange = () => {
     console.log("[webrtc] teacher->", studentId, "connection state:", pc.connectionState);
     updateShareStatus();
@@ -876,6 +904,13 @@ async function createTeacherConnection(ch, studentId) {
       pc.restartIce?.();
     }
   };
+  // If it never reaches "connected" within 15s, this is almost always a
+  // TURN/network problem — log it clearly instead of leaving a silent hang.
+  setTimeout(() => {
+    if (state.peerConnections.get(studentId) === pc && pc.connectionState !== "connected" && pc.connectionState !== "closed") {
+      console.error(`[webrtc] teacher->${studentId} never connected after 15s (state: ${pc.connectionState}). Likely cause: TURN relay unreachable/rejecting — check METERED_API_KEY config.`);
+    }
+  }, 15000);
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: studentId, from: state.user.id, kind: "offer", data: offer } });
@@ -889,7 +924,7 @@ async function handleSignal(ch, payload) {
   if (!isAdmin) {
     if (payload.kind === "offer") {
       console.log("[webrtc] received offer from teacher");
-      const pc = new RTCPeerConnection(ICE_SERVERS);
+      const pc = new RTCPeerConnection(await getIceServers());
       state.peerConnection = pc;
       state.pendingCandidates.set("__student", []);
       pc.ontrack = (e) => {
@@ -912,8 +947,12 @@ async function handleSignal(ch, payload) {
         });
       };
       pc.onicecandidate = (e) => {
-        if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "ice", data: e.candidate } });
+        if (e.candidate) {
+          console.log("[webrtc] student local candidate:", e.candidate.type, e.candidate.candidate);
+          ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "ice", data: e.candidate } });
+        }
       };
+      pc.oniceconnectionstatechange = () => console.log("[webrtc] student ICE state:", pc.iceConnectionState);
       await pc.setRemoteDescription(new RTCSessionDescription(payload.data));
       // Flush any ICE candidates that arrived before the offer did.
       const queued = state.pendingCandidates.get("__student") || [];
@@ -933,6 +972,16 @@ async function handleSignal(ch, payload) {
           ph.classList.remove("hidden");
         }
       };
+      // Never hang on "Connecting..." forever — after 15s with no result,
+      // tell the student plainly instead of leaving them staring at nothing.
+      setTimeout(() => {
+        if (state.peerConnection === pc && pc.connectionState !== "connected" && pc.connectionState !== "closed") {
+          const ph = document.getElementById("screen-placeholder");
+          ph.textContent = "Still not connecting — this is usually a network/firewall issue. Try switching wifi/network, or ask the teacher to check their connection.";
+          ph.classList.remove("hidden");
+          console.error(`[webrtc] student never connected after 15s (state: ${pc.connectionState}).`);
+        }
+      }, 15000);
     } else if (payload.kind === "ice") {
       if (state.peerConnection && state.peerConnection.remoteDescription) {
         try { await state.peerConnection.addIceCandidate(payload.data); }
