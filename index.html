@@ -55,7 +55,7 @@
 
   /* auth screen */
   .auth-wrap{min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--navy);}
-  .auth-box{width:380px; background:#fff; border-radius:16px; padding:32px;}
+  .auth-box{width:380px; max-width:calc(100vw - 32px); background:#fff; border-radius:16px; padding:32px;}
   .auth-tabs{display:flex; gap:8px; margin-bottom:18px;}
   .auth-tab{flex:1; text-align:center; padding:8px; border-radius:8px; background:var(--bg); font-weight:600; font-size:13px; color:var(--ink-soft); cursor:pointer;}
   .auth-tab.active{background:var(--navy); color:#fff;}
@@ -485,10 +485,36 @@ async function enterClassroom(c) {
   document.getElementById("yt-admin-controls").classList.toggle("hidden", !isAdmin);
   document.getElementById("teacher-share-controls").innerHTML = isAdmin ? `
     <button class="btn-amber" id="share-btn" onclick="toggleScreenShare()">Start screen share</button>
+    <span id="mic-status" class="muted" style="margin-left:10px;"></span>
   ` : "";
+  if (isAdmin && !navigator.mediaDevices?.getDisplayMedia) {
+    document.getElementById("teacher-share-controls").innerHTML =
+      `<span class="muted">Screen sharing isn't supported on this device/browser — phones and tablets (iOS and Android) can't present. Use a laptop or desktop browser (Chrome, Edge, or Safari on Mac) to share your screen.</span>`;
+  }
 
   await joinRealtimeChannel(c.id);
   if (!isAdmin) await recordAttendanceJoin(c.id);
+  if (isAdmin && navigator.mediaDevices?.getDisplayMedia) ensureMicWarm();
+}
+
+// Ask for mic permission right away (once, per browser session) instead of
+// mid-flow when the teacher clicks "Start screen share" — so that click
+// later feels instant instead of pausing on a permission prompt.
+async function ensureMicWarm() {
+  const el = document.getElementById("mic-status");
+  if (state.micGranted) return;
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(t => t.stop()); // just warming the permission, not staying hot
+    state.micGranted = true;
+    if (el) { el.textContent = "🎤 Mic ready"; el.style.color = "var(--ink-soft)"; }
+  } catch (e) {
+    state.micGranted = false;
+    if (el) {
+      el.innerHTML = `🎤 Mic not enabled — <a href="#" onclick="ensureMicWarm();return false;" style="color:var(--danger);">click to allow</a>`;
+    }
+    console.warn("[audio] mic warm-up failed:", e.name || e.message);
+  }
 }
 
 window.leaveClassroom = async () => {
@@ -870,11 +896,20 @@ async function handleSignal(ch, payload) {
         console.log("[webrtc] received remote track:", e.track.kind);
         const video = document.getElementById("remote-video");
         video.srcObject = e.streams[0];
-        video.muted = true;
         video.classList.remove("hidden");
         document.getElementById("screen-placeholder").classList.add("hidden");
-        video.play().catch(err => console.warn("[webrtc] autoplay blocked:", err));
-        document.getElementById("unmute-btn").classList.remove("hidden");
+        // Try to play WITH sound right away. Because the student already
+        // interacted with the page (clicking "Join Class"), most browsers
+        // treat that as enough to allow unmuted autoplay from here on, so
+        // this usually just works with no extra tap needed. We only show
+        // the manual "Turn on sound" button if the browser actually blocks it.
+        video.muted = false;
+        video.play().catch(err => {
+          console.warn("[webrtc] unmuted autoplay blocked, falling back to muted:", err.name || err);
+          video.muted = true;
+          video.play().catch(e2 => console.warn("[webrtc] muted autoplay also blocked:", e2));
+          document.getElementById("unmute-btn").classList.remove("hidden");
+        });
       };
       pc.onicecandidate = (e) => {
         if (e.candidate) ch.send({ type: "broadcast", event: "webrtc-signal", payload: { to: payload.from, from: state.user.id, kind: "ice", data: e.candidate } });
@@ -942,6 +977,19 @@ window.unmuteScreen = () => {
   video.play().catch(() => {});
   document.getElementById("unmute-btn").classList.add("hidden");
 };
+
+// Extra safety net: if unmuted autoplay was blocked, the very next tap or
+// click ANYWHERE on the page (not just the dedicated button) silently
+// unlocks it too — most students will do this naturally within seconds
+// just by interacting with the page.
+document.addEventListener("click", () => {
+  const video = document.getElementById("remote-video");
+  if (video && video.muted && !video.classList.contains("hidden")) {
+    video.muted = false;
+    video.play().catch(() => {});
+    document.getElementById("unmute-btn")?.classList.add("hidden");
+  }
+}, { capture: true });
 
 /* ---------------- utils ---------------- */
 function escapeHtml(str) {
